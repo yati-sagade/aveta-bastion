@@ -99,7 +99,7 @@ LOOP:
 		}
 
 		timeStamp := math.Float64frombits(msgHeader.TimeStampBits)
-		if msgHeader.Flags&0x10 == 0 {
+		if msgHeader.Flags&0x01 == 0 {
 			// video frame
 			var imgSize uint32
 			binary.Read(c, binary.LittleEndian, &imgSize)
@@ -119,7 +119,7 @@ LOOP:
 			if err != nil {
 				log.Fatalf("Error reading command byte: " + err.Error())
 			}
-			cmdData <- timestampedBytes{timeStamp, cmdBytes}
+			cmdData <- timestampedBytes{timeStamp, []byte{cmdBytes[0]}}
 		}
 	}
 }
