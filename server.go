@@ -15,6 +15,12 @@ import (
 	"github.com/satori/go.uuid"
 )
 
+const (
+	VideoFilename = "video.avi"
+	SyncFilename  = "sync.txt"
+	CmdFilename   = "commands.txt"
+)
+
 type DataCollectionServer struct {
 	Addr      string
 	Ffmpeg    string
@@ -66,15 +72,13 @@ func (srv *DataCollectionServer) HandleConnection(c net.Conn) {
 			connOutputDir, err.Error())
 	}
 
-	videoFile := path.Join(connOutputDir, "video.mp4")
 	videoQuit := make(chan struct{})
 	videoData := make(chan timestampedBytes)
-	go srv.VideoWriter(videoFile, videoData, videoQuit)
+	go srv.VideoWriter(connOutputDir, videoData, videoQuit)
 
-	cmdFile := path.Join(connOutputDir, "cmd.txt")
 	cmdQuit := make(chan struct{})
 	cmdData := make(chan timestampedBytes)
-	go srv.CmdWriter(cmdFile, cmdData, cmdQuit)
+	go srv.CmdWriter(connOutputDir, cmdData, cmdQuit)
 
 	defer func() {
 		cmdQuit <- struct{}{}
@@ -124,7 +128,8 @@ LOOP:
 	}
 }
 
-func (srv *DataCollectionServer) CmdWriter(outfile string, data chan timestampedBytes, quit chan struct{}) {
+func (srv *DataCollectionServer) CmdWriter(connOutputDir string, data chan timestampedBytes, quit chan struct{}) {
+	outfile := path.Join(connOutputDir, CmdFilename)
 	fp, err := os.Create(outfile)
 	defer fp.Close()
 	if err != nil {
@@ -153,7 +158,7 @@ func (srv *DataCollectionServer) ffmpegCommand(outfile string) *exec.Cmd {
 		"-vcodec", "libx264",
 		"-preset", "veryfast",
 		"-an",
-		"-f", "mp4",
+		"-f", "avi",
 		"-pix_fmt", "yuv420p",
 		"-y",
 		outfile,
@@ -181,8 +186,9 @@ func (srv *DataCollectionServer) startFfmpegProcess(outfile string) (io.WriteClo
 	return inPipe, errPipe, command
 }
 
-func (srv *DataCollectionServer) VideoWriter(outfile string, data chan timestampedBytes, quit chan struct{}) {
-	syncfile := outfile + ".sync"
+func (srv *DataCollectionServer) VideoWriter(connOutputDir string, data chan timestampedBytes, quit chan struct{}) {
+	outfile := path.Join(connOutputDir, VideoFilename)
+	syncfile := path.Join(connOutputDir, SyncFilename)
 	fp, err := os.Create(syncfile)
 	if err != nil {
 		log.Fatalf("Error creating sync file for video %s: %s\n",
@@ -197,20 +203,28 @@ func (srv *DataCollectionServer) VideoWriter(outfile string, data chan timestamp
 		command.Wait()
 	}()
 
+	totalFrameCount := 0
 	var currentTimestamp uint64
 	frameCount := 0 // how many frames this second
+
+	writeLine := func(t uint64, f int) {
+		s := fmt.Sprintf("%d,%d\n", t, f)
+		if _, err := fp.WriteString(s); err != nil {
+			log.Fatalf("Error writing to syncfile: %s\n", err.Error())
+		}
+	}
 
 IMAGE:
 	for {
 		select {
 		case imgBytes := <-data:
 			sec := uint64(imgBytes.Timestamp)
+			if currentTimestamp == 0 {
+				currentTimestamp = sec
+			}
 			if sec != currentTimestamp {
-				if currentTimestamp > 0 && frameCount > 0 {
-					s := fmt.Sprintf("%d,%d\n", currentTimestamp, frameCount)
-					if _, err := fp.WriteString(s); err != nil {
-						log.Fatalf("Error writing to syncfile: %s\n", err.Error())
-					}
+				if frameCount > 0 {
+					writeLine(currentTimestamp, frameCount)
 				}
 				currentTimestamp = sec
 				frameCount = 0
@@ -220,10 +234,15 @@ IMAGE:
 				fatalFromPipe(errPipe, "Error with ffmpeg process: ")
 			}
 			frameCount++
+			totalFrameCount++
 		case <-quit:
 			break IMAGE
 		}
 	}
+	if frameCount > 0 {
+		writeLine(currentTimestamp, frameCount)
+	}
+	log.Printf("%d frames written", totalFrameCount)
 }
 
 func fatalFromPipe(pipe io.Reader, msg string) {
