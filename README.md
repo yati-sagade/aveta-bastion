@@ -16,4 +16,15 @@ will be needed for the actual training, but keeping it anyway since the Python
 producer can barely manage >9fps from my experiments. Perhaps a multithreaded
 producer as described [here][1] would help.
 
+
+## Helper scripts
+
+### movedata.pl
+
+Since the server will put data from all sessions in ~/aveta-training-data (with
+a unique subdirectory for each session), after collecting data on one type of
+track, it is helpful to move this data to another directory, organized by
+track-types. `movedata.pl` helps me do that. `perldoc movedata.pl` for usage.
+
+
 [1]: https://picamera.readthedocs.io/en/release-1.10/recipes1.html#streaming-capture
