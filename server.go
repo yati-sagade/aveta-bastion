@@ -7,12 +7,12 @@ import (
 	"io"
 	"log"
 	"math"
+	"math/rand"
 	"net"
 	"os"
 	"os/exec"
 	"path"
-
-	"github.com/satori/go.uuid"
+	"time"
 )
 
 const (
@@ -32,6 +32,9 @@ func NewDataCollectionServer(addr, ffmpeg, outputDir string) *DataCollectionServ
 }
 
 func (srv *DataCollectionServer) Start() error {
+
+	rand.Seed(time.Now().Unix())
+
 	l, err := net.Listen("tcp", srv.Addr)
 	if err != nil {
 		return err
@@ -64,7 +67,9 @@ func (srv *DataCollectionServer) HandleConnection(c net.Conn) {
 		TimeStampBits uint64
 	}
 
-	connId := uuid.NewV4().String()
+	now := time.Now().UTC().Format(time.RFC3339)
+	randIdent := rand.Int63()
+	connId := fmt.Sprintf("%s_%d", now, randIdent)
 	connOutputDir := path.Join(srv.OutputDir, connId)
 
 	if err := os.MkdirAll(connOutputDir, 0755); err != nil {
@@ -150,7 +155,8 @@ func (srv *DataCollectionServer) CmdWriter(connOutputDir string, data chan times
 }
 
 func (srv *DataCollectionServer) ffmpegCommand(outfile string) *exec.Cmd {
-	ffmpegFilters := `vflip`
+	// flip around both axes and then crop to only keep the lower half.
+	ffmpegFilters := `vflip,hflip,crop=in_w:in_h/2`
 	command := exec.Command(srv.Ffmpeg,
 		"-f", "mjpeg",
 		"-i", "-",
@@ -203,7 +209,6 @@ func (srv *DataCollectionServer) VideoWriter(connOutputDir string, data chan tim
 		command.Wait()
 	}()
 
-	totalFrameCount := 0
 	var currentTimestamp uint64
 	frameCount := 0 // how many frames this second
 
@@ -234,7 +239,6 @@ IMAGE:
 				fatalFromPipe(errPipe, "Error with ffmpeg process: ")
 			}
 			frameCount++
-			totalFrameCount++
 		case <-quit:
 			break IMAGE
 		}
@@ -242,7 +246,6 @@ IMAGE:
 	if frameCount > 0 {
 		writeLine(currentTimestamp, frameCount)
 	}
-	log.Printf("%d frames written", totalFrameCount)
 }
 
 func fatalFromPipe(pipe io.Reader, msg string) {
