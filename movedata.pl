@@ -54,7 +54,7 @@ sub get_entries {
     my $dirname = shift // die "Need directory path";
     opendir my $dh, $dirname or die $!;
     my @entries = grep { -d $_ }
-                  map  { File::Spec->catfile($dirname, $_) } 
+                  map  { File::Spec->catfile($dirname, $_) }
                   sort
                   grep { !/^\./ } readdir $dh;
     closedir $dh;
@@ -67,24 +67,44 @@ __END__
 
 =head1 NAME
 
-    movedata.pl
+movedata.pl
 
 =head1 SYNOPSIS
 
-    perl movedata.pl tagname
+perl movedata.pl tagname
 
 =head1 DESCRIPTION
 
-    Move directories in ~/aveta-training-data/ to
-     ~/aveta-training-data-final/${tagname}. This script is meant to be used
-    with aveta-bastion (github.com/yati-sagade/aveta-bastion) to move training
-    data for aveta under categories (simple track, 8 shaped track etc).
-    
-    Each driving session using aveta-bastion results in a timestamped directory
-    being created under ~/aveta-training-data. Once multiple drives for
-    a particular track config/environment are captured, this script can be
-    used to move everything under ~/aveta-training-data to
-    ~/aveta-training-data-final/${tagname}.
+Move directories in ~/aveta-training-data/ to
+~/aveta-training-data-final/${tagname}. This script is meant to be used
+with aveta-bastion (github.com/yati-sagade/aveta-bastion) to move training
+data for aveta under categories (simple track, 8 shaped track etc).
+
+Each driving session using aveta-bastion results in a timestamped directory
+being created under B<~/aveta-training-data>. Once multiple drives for
+a particular track config/environment are captured, this script can be
+used to move everything under B<~/aveta-training-data> to
+B<~/aveta-training-data-final/${tagname}>.
+
+=head1 EXAMPLE
+
+For example, if we data from 2 sessions, B<~/aveta-training-data> might look
+like:
+
+     $ ls ~/aveta-training-data
+     2016-12-24T13:56:53Z_7258228008696365175  2016-12-24T13:59:29Z_4375758122547511333
+
+At this point, doing
+
+     $ perl movedata.pl circle
+
+Will put the above two directories in B<~/aveta-training-data-final/circle/>:
+
+     $ ls ~/aveta-training-data-final/circle/
+     0  1
+
+Note that the directories are renamed to B<0>, B<1>, etc, in the order of
+the leading timestamps on the original directory names.
 
 =head1 AUTHORS
 
