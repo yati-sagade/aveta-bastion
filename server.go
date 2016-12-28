@@ -60,13 +60,18 @@ type timestampedBytes struct {
 	Data      []byte
 }
 
-func (srv *DataCollectionServer) HandleConnection(c net.Conn) {
+type rawCmd struct {
+	Cmd        byte
+	LeftSpeed  int16
+	RightSpeed int16
+}
 
-	var msgHeader struct {
-		Flags         uint8
-		TimeStampBits uint64
-	}
+type timestampedCmd struct {
+	Timestamp float64
+	rawCmd
+}
 
+func (srv *DataCollectionServer) createConnOutputDir() string {
 	now := time.Now().UTC().Format(time.RFC3339)
 	randIdent := rand.Int63()
 	connId := fmt.Sprintf("%s_%d", now, randIdent)
@@ -76,13 +81,37 @@ func (srv *DataCollectionServer) HandleConnection(c net.Conn) {
 		log.Fatalf("Could not create directory %s: %s\n",
 			connOutputDir, err.Error())
 	}
+	return connOutputDir
+}
+
+type msgHeader struct {
+	Flags         uint8
+	TimeStampBits uint64
+}
+
+// Return if we have reached end of stream
+func readMsgHeader(c net.Conn, s *msgHeader) bool {
+	err := binary.Read(c, binary.LittleEndian, s)
+	if err != nil {
+		if err == io.EOF {
+			return true
+		}
+		log.Fatalf("Error reading image header: " + err.Error())
+	}
+	return false
+}
+
+func (srv *DataCollectionServer) HandleConnection(c net.Conn) {
+
+	var header msgHeader
+	connOutputDir := srv.createConnOutputDir()
 
 	videoQuit := make(chan struct{})
 	videoData := make(chan timestampedBytes)
 	go srv.VideoWriter(connOutputDir, videoData, videoQuit)
 
 	cmdQuit := make(chan struct{})
-	cmdData := make(chan timestampedBytes)
+	cmdData := make(chan timestampedCmd)
 	go srv.CmdWriter(connOutputDir, cmdData, cmdQuit)
 
 	defer func() {
@@ -90,50 +119,54 @@ func (srv *DataCollectionServer) HandleConnection(c net.Conn) {
 		videoQuit <- struct{}{}
 	}()
 
-	cmdBytes := make([]byte, 1)
 LOOP:
 	for {
-		err := binary.Read(c, binary.LittleEndian, &msgHeader)
-
-		if err != nil {
-			if err == io.EOF {
-				break LOOP
-			}
-			log.Fatalf("Error reading image header: " + err.Error())
+		if sawEof := readMsgHeader(c, &header); sawEof {
+			break LOOP
 		}
 
-		if msgHeader.Flags&0x80 == 0x80 {
+		if header.Flags&0x80 == 0x80 {
 			// End of stream
 			return
 		}
 
-		timeStamp := math.Float64frombits(msgHeader.TimeStampBits)
-		if msgHeader.Flags&0x01 == 0 {
+		timeStamp := math.Float64frombits(header.TimeStampBits)
+		if header.Flags&0x01 == 0 {
 			// video frame
-			var imgSize uint32
-			binary.Read(c, binary.LittleEndian, &imgSize)
-			imgBuff := make([]byte, imgSize)
-			readSoFar := 0
-
-			for readSoFar != int(imgSize) {
-				n, err := c.Read(imgBuff[readSoFar:imgSize])
-				if err != nil {
-					log.Fatalf("Error reading image data: " + err.Error())
-				}
-				readSoFar += n
-			}
-			videoData <- timestampedBytes{timeStamp, imgBuff}
+			videoData <- readVideoFrame(c, timeStamp)
 		} else {
-			err := binary.Read(c, binary.LittleEndian, &cmdBytes[0])
-			if err != nil {
-				log.Fatalf("Error reading command byte: " + err.Error())
-			}
-			cmdData <- timestampedBytes{timeStamp, []byte{cmdBytes[0]}}
+			cmdData <- readCmdMsg(c, timeStamp)
 		}
 	}
 }
 
-func (srv *DataCollectionServer) CmdWriter(connOutputDir string, data chan timestampedBytes, quit chan struct{}) {
+func readCmdMsg(c net.Conn, timeStamp float64) timestampedCmd {
+	var msg timestampedCmd
+	msg.Timestamp = timeStamp
+	err := binary.Read(c, binary.LittleEndian, &msg.rawCmd)
+	if err != nil {
+		log.Fatalf("Error reading command message: " + err.Error())
+	}
+	return msg
+}
+
+func readVideoFrame(c net.Conn, timeStamp float64) timestampedBytes {
+	var imgSize uint32
+	binary.Read(c, binary.LittleEndian, &imgSize)
+	imgBuff := make([]byte, imgSize)
+	readSoFar := 0
+
+	for readSoFar != int(imgSize) {
+		n, err := c.Read(imgBuff[readSoFar:imgSize])
+		if err != nil {
+			log.Fatalf("Error reading image data: " + err.Error())
+		}
+		readSoFar += n
+	}
+	return timestampedBytes{timeStamp, imgBuff}
+}
+
+func (srv *DataCollectionServer) CmdWriter(connOutputDir string, data chan timestampedCmd, quit chan struct{}) {
 	outfile := path.Join(connOutputDir, CmdFilename)
 	fp, err := os.Create(outfile)
 	defer fp.Close()
@@ -142,9 +175,12 @@ func (srv *DataCollectionServer) CmdWriter(connOutputDir string, data chan times
 	}
 	for {
 		select {
-		case cmdBytes := <-data:
-			b := string(cmdBytes.Data[:1])
-			s := fmt.Sprintf("%0.2f,%s\n", cmdBytes.Timestamp, b)
+		case cmd := <-data:
+			b := string(cmd.Cmd)
+
+			s := fmt.Sprintf("%0.2f,%s,%d,%d\n",
+				cmd.Timestamp, b, cmd.LeftSpeed, cmd.RightSpeed)
+
 			if _, err := fp.WriteString(s); err != nil {
 				log.Fatalf("Error writing to command file: %s\n", err.Error())
 			}
@@ -192,6 +228,13 @@ func (srv *DataCollectionServer) startFfmpegProcess(outfile string) (io.WriteClo
 	return inPipe, errPipe, command
 }
 
+func writeSyncFileLine(out *os.File, timestamp uint64, count int) {
+	s := fmt.Sprintf("%d,%d\n", timestamp, count)
+	if _, err := out.WriteString(s); err != nil {
+		log.Fatalf("Error writing to syncfile: %s\n", err.Error())
+	}
+}
+
 func (srv *DataCollectionServer) VideoWriter(connOutputDir string, data chan timestampedBytes, quit chan struct{}) {
 	outfile := path.Join(connOutputDir, VideoFilename)
 	syncfile := path.Join(connOutputDir, SyncFilename)
@@ -212,13 +255,6 @@ func (srv *DataCollectionServer) VideoWriter(connOutputDir string, data chan tim
 	var currentTimestamp uint64
 	frameCount := 0 // how many frames this second
 
-	writeLine := func(t uint64, f int) {
-		s := fmt.Sprintf("%d,%d\n", t, f)
-		if _, err := fp.WriteString(s); err != nil {
-			log.Fatalf("Error writing to syncfile: %s\n", err.Error())
-		}
-	}
-
 IMAGE:
 	for {
 		select {
@@ -229,7 +265,7 @@ IMAGE:
 			}
 			if sec != currentTimestamp {
 				if frameCount > 0 {
-					writeLine(currentTimestamp, frameCount)
+					writeSyncFileLine(fp, currentTimestamp, frameCount)
 				}
 				currentTimestamp = sec
 				frameCount = 0
@@ -244,7 +280,7 @@ IMAGE:
 		}
 	}
 	if frameCount > 0 {
-		writeLine(currentTimestamp, frameCount)
+		writeSyncFileLine(fp, currentTimestamp, frameCount)
 	}
 }
 
